@@ -1,0 +1,123 @@
+{
+  "index_patterns": ["access-logs-*"],
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 1,
+    "index.lifecycle.name": "access-logs-policy",
+    "index.lifecycle.rollover_alias": "access-logs"
+  },
+  "mappings": {
+    "properties": {
+      "timestamp": {
+        "type": "date"
+      },
+      "version": {
+        "type": "keyword"
+      },
+      "ip": {
+        "type": "ip"
+      },
+      "domain": {
+        "type": "keyword"
+      },
+      "status": {
+        "type": "integer"
+      },
+      "bytes": {
+        "type": "long"
+      },
+      "server": {
+        "type": "keyword"
+      },
+      "response_time": {
+        "type": "float"
+      },
+      "total_time": {
+        "type": "float"
+      },
+      "request": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "method": {
+        "type": "keyword"
+      },
+      "path": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "query": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "protocol": {
+        "type": "keyword"
+      },
+      "user_agent": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "referer": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "type": {
+        "type": "keyword"
+      },
+      "geoip": {
+        "properties": {
+          "country_iso_code": {
+            "type": "keyword"
+          },
+          "country_name": {
+            "type": "keyword"
+          },
+          "region_name": {
+            "type": "keyword"
+          },
+          "city_name": {
+            "type": "keyword"
+          },
+          "location": {
+            "type": "geo_point"
+          }
+        }
+      },
+      "metadata": {
+        "type": "object",
+        "dynamic": true
+      },
+      "tags": {
+        "type": "keyword"
+      }
+    }
+  },
+  "aliases": {
+    "access-logs": {}
+  }
+}
