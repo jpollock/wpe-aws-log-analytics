@@ -1,51 +1,170 @@
-const AWS = require('aws-sdk');
-const s3 = new AWS.S3();
-const sns = new AWS.SNS();
+const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { SNSClient, PublishCommand } = require('@aws-sdk/client-sns');
 const { Client } = require('@opensearch-project/opensearch');
 const zlib = require('zlib');
 
-// Initialize OpenSearch client
-const client = new Client({
-    node: process.env.OPENSEARCH_ENDPOINT,
+// Initialize clients
+const s3Client = new S3Client();
+const snsClient = new SNSClient();
+const opensearchClient = new Client({
+    node: `https://${process.env.OPENSEARCH_ENDPOINT}`,
     auth: {
-        type: 'aws_iam'
+        username: 'admin',
+        password: process.env.OPENSEARCH_PASSWORD
     },
-    awsRegion: process.env.AWS_REGION
+    ssl: {
+        rejectUnauthorized: true
+    }
 });
+
+// Index mappings
+const indexMappings = {
+    'access-logs': {
+        mappings: {
+            properties: {
+                timestamp: { type: 'date' },
+                version: { type: 'keyword' },
+                ip: { type: 'ip' },
+                domain: { type: 'keyword' },
+                status: { type: 'integer' },
+                bytes: { type: 'long' },
+                server: { type: 'keyword' },
+                response_time: { type: 'float' },
+                total_time: { type: 'float' },
+                request: { type: 'text' },
+                type: { type: 'keyword' }
+            }
+        }
+    },
+    'error-logs': {
+        mappings: {
+            properties: {
+                timestamp: { type: 'date' },
+                message: { type: 'text' },
+                repeat_count: { type: 'integer' },
+                type: { type: 'keyword' }
+            }
+        }
+    },
+    'apache-access-logs': {
+        mappings: {
+            properties: {
+                timestamp: { type: 'date' },
+                ip: { type: 'ip' },
+                request: { type: 'text' },
+                status: { type: 'integer' },
+                bytes: { type: 'long' },
+                referer: { type: 'keyword' },
+                user_agent: { type: 'keyword' },
+                type: { type: 'keyword' }
+            }
+        }
+    }
+};
+
+// Ensure index exists with mapping
+const ensureIndex = async (indexName) => {
+    try {
+        // Check if index exists
+        console.log(`Checking for index ${indexName}`);
+        const exists = await opensearchClient.indices.exists({ index: indexName });
+        console.log(`Index ${indexName} exists: ${exists.body}`);
+        if (!exists.body) {
+            console.log(`Creating index ${indexName} with mapping`);
+            await opensearchClient.indices.create({
+                index: indexName,
+                body: indexMappings[indexName]
+            });
+            console.log(`Successfully created index ${indexName}`);
+        }
+    } catch (error) {
+        console.error(`Error ensuring index ${indexName}:`, error);
+        throw error;
+    }
+};
 
 // Parse error log line
 const parseErrorLog = (line) => {
-    const match = line.match(/\[(.*?)\] (.+)/);
-    if (!match) return null;
+    try {
+        const match = line.match(/\[(.*?)\] (.+)/);
+        if (!match) return null;
 
-    const [, timestamp, message] = match;
-    const repeatedMatch = message.match(/message repeated (\d+) times: \[(.*)\]/);
+        const [, timestamp, message] = match;
+        // Validate timestamp format
+        const date = new Date(timestamp);
+        if (isNaN(date.getTime())) return null;
 
-    if (repeatedMatch) {
-        const [, count, repeatedMessage] = repeatedMatch;
+        const repeatedMatch = message.match(/message repeated (\d+) times: \[(.*)\]/);
+
+        if (repeatedMatch) {
+            const [, count, repeatedMessage] = repeatedMatch;
+            return {
+                timestamp: date.toISOString(),
+                message: repeatedMessage.trim(),
+                repeat_count: parseInt(count, 10),
+                type: 'error'
+            };
+        }
+
         return {
-            timestamp: new Date(timestamp).toISOString(),
-            message: repeatedMessage.trim(),
-            repeat_count: parseInt(count, 10),
+            timestamp: date.toISOString(),
+            message: message.trim(),
+            repeat_count: 1,
             type: 'error'
         };
+    } catch (error) {
+        return null;
     }
+};
+
+// Parse date in format "DD/MMM/YYYY:HH:mm:ss +ZZZZ"
+const parseLogDate = (dateStr) => {
+    // Extract components from the date string
+    const match = dateStr.match(/(\d{2})\/(\w{3})\/(\d{4}):(\d{2}:\d{2}:\d{2})/);
+    if (!match) return null;
+
+    const [, day, month, year, time] = match;
+    const months = {
+        Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06',
+        Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12'
+    };
+
+    // Construct ISO date string
+    return `${year}-${months[month]}-${day}T${time}.000Z`;
+};
+
+// Parse Apache-style access log line
+const parseApacheStyleLog = (line) => {
+    // Example Apache format: %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\"
+    const match = line.match(/^(\S+) \S+ \S+ \[([^\]]+)\] "([^"]*)" (\d+) (\d+|-) "([^"]*)" "([^"]*)"$/);
+    if (!match) return null;
+
+    const [, ip, timestamp, request, status, bytes, referer, userAgent] = match;
+    const isoTimestamp = parseLogDate(timestamp);
+    if (!isoTimestamp) return null;
 
     return {
-        timestamp: new Date(timestamp).toISOString(),
-        message: message.trim(),
-        repeat_count: 1,
-        type: 'error'
+        timestamp: isoTimestamp,
+        ip,
+        request,
+        status: parseInt(status, 10),
+        bytes: bytes === '-' ? 0 : parseInt(bytes, 10),
+        referer,
+        user_agent: userAgent,
+        type: 'apache_access'
     };
 };
 
-// Parse access log line
+// Parse standard access log line
 const parseAccessLog = (line) => {
     const parts = line.split('|');
     if (parts.length < 10) return null;
 
+    const timestamp = parseLogDate(parts[0]);
+    if (!timestamp) return null;
+
     return {
-        timestamp: new Date(parts[0].replace(/(\d{2})\/(\w{3})\/(\d{4}):(\d{2}:\d{2}:\d{2})/, '$3-$2-$1T$4')).toISOString(),
+        timestamp,
         version: parts[1],
         ip: parts[2],
         domain: parts[3],
@@ -59,6 +178,29 @@ const parseAccessLog = (line) => {
     };
 };
 
+// Helper functions for log processing
+exports.processLogLine = (line, type) => {
+    if (type === 'error') {
+        return parseErrorLog(line);
+    } else if (type === 'apache') {
+        return parseApacheStyleLog(line);
+    } else {
+        return parseAccessLog(line);
+    }
+};
+
+exports.formatLogForVerification = (entry, type) => {
+    if (type === 'error') {
+        return entry.message;
+    } else if (type === 'apache') {
+        const [method, path] = entry.request.split(' ');
+        return `${entry.user_agent.replace(/"/g, '')} ${method} ${path}`;
+    } else {
+        // For standard access logs, include the full request to match verify script's grep pattern
+        return `${entry.domain} ${entry.request}`;
+    }
+};
+
 // Check for critical patterns
 const isCriticalError = (message) => {
     const criticalPatterns = JSON.parse(process.env.ERROR_PATTERNS || '[]');
@@ -69,24 +211,35 @@ const isCriticalError = (message) => {
 
 // Send alert
 const sendAlert = async (message, severity = 'INFO') => {
-    const params = {
+    const command = new PublishCommand({
         Message: JSON.stringify({
             severity,
             message,
             timestamp: new Date().toISOString()
         }),
         TopicArn: process.env.SNS_TOPIC_ARN
-    };
+    });
 
-    await sns.publish(params).promise();
+    await snsClient.send(command);
 };
 
 // Index log entry in OpenSearch
 const indexLog = async (entry, index) => {
-    await client.index({
-        index,
-        body: entry
-    });
+    // Ensure index exists before attempting to write
+    await ensureIndex(index);
+    console.log(`Attempting to index entry to ${index}:`, JSON.stringify(entry, null, 2));
+    try {
+        const response = await opensearchClient.index({
+            index,
+            body: entry
+        });
+        console.log(`Successfully indexed to ${index}. Response:`, JSON.stringify(response, null, 2));
+    } catch (error) {
+        console.error(`Failed to index to ${index}:`, error);
+        console.error('Entry that failed:', JSON.stringify(entry, null, 2));
+        console.error('OpenSearch endpoint:', process.env.OPENSEARCH_ENDPOINT);
+        throw error; // Re-throw to handle in main handler
+    }
 };
 
 // Main handler
@@ -97,8 +250,9 @@ exports.handler = async (event) => {
         const bucket = s3Record.bucket.name;
         const key = decodeURIComponent(s3Record.object.key);
         
-        const response = await s3.getObject({ Bucket: bucket, Key: key }).promise();
-        let content = response.Body;
+        const command = new GetObjectCommand({ Bucket: bucket, Key: key });
+        const response = await s3Client.send(command);
+        let content = await response.Body.transformToByteArray();
 
         // Handle gzip compression
         if (key.endsWith('.gz')) {
@@ -107,17 +261,43 @@ exports.handler = async (event) => {
 
         const lines = content.toString('utf-8').split('\n').filter(line => line.trim());
         
-        // Determine log type from filename
-        const isErrorLog = key.toLowerCase().includes('error');
-        const indexName = isErrorLog ? 'error-logs' : 'access-logs';
+        // Determine log type from path and filename
+        const isErrorLog = key.includes('/wpe_logs/error/');
+        const isApacheStyle = key.includes('apachestyle.log.gz');
+        let indexName;
         
+        if (isErrorLog) {
+            indexName = 'error-logs';
+        } else if (isApacheStyle) {
+            indexName = 'apache-access-logs';
+        } else {
+            indexName = 'access-logs';
+        }
+        
+        // Create indexes if they don't exist
+        await ensureIndex(indexName);
+
         // Process each line
         for (const line of lines) {
-            const entry = isErrorLog ? parseErrorLog(line) : parseAccessLog(line);
+            // Log the raw line for verification
+            console.log('Processing raw log line:', line);
+
+            const logType = isErrorLog ? 'error' : (isApacheStyle ? 'apache' : 'standard');
+            const entry = exports.processLogLine(line, logType);
             if (!entry) continue;
 
-            // Index the log entry
-            await indexLog(entry, indexName);
+            // Debug log the type and format
+            console.log('Log type:', logType);
+            console.log('Formatted output:', exports.formatLogForVerification(entry, logType));
+            
+            try {
+                // Index the log entry
+                await indexLog(entry, indexName);
+            } catch (error) {
+                console.error('Error indexing log entry:', error);
+                // Continue processing other entries even if one fails
+                continue;
+            }
 
             // Check for critical errors
             if (isErrorLog && isCriticalError(entry.message)) {

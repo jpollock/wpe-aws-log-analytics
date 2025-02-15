@@ -14,25 +14,43 @@ if ! command -v npm &> /dev/null; then
     exit 1
 fi
 
-# Clean up any existing build
-rm -f ../log_processor.zip
+# Clean up
+echo "Cleaning up..."
+rm -rf node_modules package-lock.json log_processor.zip dist
 
 # Install production dependencies
 echo "Installing dependencies..."
-npm ci --production
+npm install --omit=dev
 
 if [ $? -ne 0 ]; then
     echo -e "${RED}Failed to install dependencies${NC}"
     exit 1
 fi
 
-# Create deployment package
+# Create a temporary directory for the package
 echo "Creating deployment package..."
-zip -r ../log_processor.zip . -x "*.test.js" "*.md" "build.sh" "package*.json"
+mkdir -p dist
+cp index.js dist/
+cp package.json dist/
 
-if [ $? -eq 0 ]; then
+# Copy all production node_modules
+cp -r node_modules dist/
+
+# Create deployment package
+cd dist
+zip -r ../log_processor.zip .
+cd ..
+
+# Clean up
+rm -rf dist
+
+if [ -f log_processor.zip ]; then
     echo -e "${GREEN}Successfully created log_processor.zip${NC}"
-    echo "Package location: ../log_processor.zip"
+    echo "Package location: log_processor.zip"
+    
+    # Move to lambda directory
+    mkdir -p ../lambda
+    mv log_processor.zip ../lambda/
 else
     echo -e "${RED}Failed to create deployment package${NC}"
     exit 1

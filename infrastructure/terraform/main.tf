@@ -62,8 +62,31 @@ resource "aws_opensearch_domain" "logs" {
     }
   }
 
+  access_policies = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          AWS = "*"
+        }
+        Action = "es:*"
+        Resource = "arn:aws:es:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:domain/${local.name_prefix}-logs/*"
+        Condition = {
+          IpAddress = {
+            "aws:SourceIp" = ["0.0.0.0/0"]
+          }
+        }
+      }
+    ]
+  })
+
   tags = local.common_tags
 }
+
+# Get current AWS region and account ID
+data "aws_region" "current" {}
+data "aws_caller_identity" "current" {}
 
 # Generate secure password for OpenSearch
 resource "random_password" "opensearch_master" {
@@ -75,10 +98,11 @@ resource "random_password" "opensearch_master" {
 resource "aws_lambda_function" "log_processor" {
   count = var.alert_email != "" ? 1 : 0  # Only create if alert email is provided
 
-  filename         = "${path.module}/log_processor.zip"
+  filename         = "${path.module}/lambda/log_processor.zip"
   function_name    = "${local.name_prefix}-log-processor"
   role            = aws_iam_role.lambda_role.arn
   handler         = "index.handler"
+  source_code_hash = filebase64sha256("${path.module}/lambda/log_processor.zip")
   runtime         = "nodejs18.x"
   memory_size     = var.lambda_memory_size
   timeout         = var.lambda_timeout
@@ -86,9 +110,10 @@ resource "aws_lambda_function" "log_processor" {
   environment {
     variables = {
       OPENSEARCH_ENDPOINT = aws_opensearch_domain.logs.endpoint
+      OPENSEARCH_PASSWORD = random_password.opensearch_master.result
       LOG_RETENTION_DAYS = var.log_retention_days
       ALERT_EMAIL       = var.alert_email
-      ERROR_PATTERNS    = jsonencode(var.error_patterns)
+      ERROR_PATTERNS    = jsonencode(["error", "exception", "fail", "critical", "emergency"])
       SNS_TOPIC_ARN    = aws_sns_topic.alerts.arn
     }
   }
@@ -109,7 +134,8 @@ resource "aws_s3_bucket_notification" "logs" {
   lambda_function {
     lambda_function_arn = aws_lambda_function.log_processor[0].arn
     events              = ["s3:ObjectCreated:*"]
-    filter_suffix       = ".log"
+    filter_prefix       = "wpe_logs/"
+    filter_suffix       = ".gz"
   }
 
   depends_on = [aws_lambda_permission.s3]

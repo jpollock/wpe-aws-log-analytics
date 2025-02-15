@@ -1,17 +1,17 @@
 {
-  "name": "wpe-log-analytics-processor",
+  "name": "log-processor",
   "version": "1.0.0",
-  "description": "Lambda function to process logs and index them in OpenSearch",
+  "description": "Lambda function for processing WPE logs",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"No tests configured\" && exit 0",
-    "build": "./build.sh"
+    "test": "jest"
   },
   "dependencies": {
-    "@opensearch-project/opensearch": "^2.5.0",
-    "aws-sdk": "^2.1550.0"
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/client-sns": "^3.0.0",
+    "@opensearch-project/opensearch": "^2.0.0"
   },
-  "engines": {
-    "node": ">=18.0.0"
+  "devDependencies": {
+    "jest": "^29.0.0"
   }
 }

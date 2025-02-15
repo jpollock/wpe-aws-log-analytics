@@ -62,6 +62,44 @@ Note: OpenSearch domain creation takes about 15-20 minutes. If verification show
 - SNS for notifications
 - S3 event triggers
 
+## Log File Structure
+
+Logs are organized in the S3 bucket as follows:
+
+```
+<bucket>/
+  wpe_logs/
+    error/              # Error logs directory
+      *.log.gz         # Gzipped error log files
+    nginx/             # Web access logs directory
+      *-access.log.gz         # Standard access log format
+      *-apachestyle.log.gz    # Apache-style access log format
+```
+
+### Log Formats
+
+1. Error Logs (`/wpe_logs/error/*.log.gz`):
+   ```
+   [2025-02-09T06:13:54.773313+00:00] message content here
+   ```
+   - Timestamp in ISO 8601 format
+   - Message content following timestamp
+   - Supports "message repeated X times" format
+
+2. Standard Access Logs (`/wpe_logs/nginx/*-access.log.gz`):
+   ```
+   timestamp|version|ip|domain|status|bytes|server|response_time|total_time|request
+   ```
+   - Pipe-delimited format
+   - Contains request timing and server details
+
+3. Apache-Style Access Logs (`/wpe_logs/nginx/*-apachestyle.log.gz`):
+   ```
+   %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\"
+   ```
+   - Standard Apache combined log format
+   - Contains IP, timestamp, request, status, bytes, referer, and user agent
+
 ## Documentation
 
 - [User Guide](docs/user-guide/)

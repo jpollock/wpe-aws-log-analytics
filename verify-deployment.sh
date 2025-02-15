@@ -82,48 +82,101 @@ check_aws_resources() {
 # Test log processing
 test_log_processing() {
     echo -e "\n${BLUE}Testing log processing...${NC}"
+    local timestamp=$(date -u +"%Y%m%d-%H%M")
+    local test_dir=$(mktemp -d)
+    local exit_code=0
+
+    # Create test error log
+    echo "Creating test error log..."
+    local error_log="$test_dir/error.log"
+    echo "[$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")] test error log entry" > "$error_log"
+    gzip "$error_log"
     
-    # Create test log file
-    echo "Creating test log file..."
-    local test_log="test-$(date +%s).log"
-    echo "[$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")] test log entry" > "$test_log"
+    # Create test standard access log
+    echo "Creating test standard access log..."
+    local access_log="$test_dir/$timestamp-test.access.log"
+    echo "$(date -u +"%d/%b/%Y:%H:%M:%S +0000")|v1|192.168.1.1|example.com|200|1234|server1|0.001|0.002|GET /test HTTP/1.1" > "$access_log"
+    gzip "$access_log"
+    
+    # Create test Apache-style access log
+    echo "Creating test Apache-style access log..."
+    local apache_log="$test_dir/$timestamp-test.apachestyle.log"
+    echo "192.168.1.1 - - [$(date -u +"%d/%b/%Y:%H:%M:%S +0000")] \"GET /test HTTP/1.1\" 200 1234 \"-\" \"Mozilla/5.0\"" > "$apache_log"
+    gzip "$apache_log"
     
     # Upload to S3
-    echo "Uploading to S3..."
-    if aws s3 cp "$test_log" "s3://$LOG_BUCKET_NAME/test/$test_log"; then
-        echo -e "${GREEN}✓ Test log uploaded successfully${NC}"
+    echo "Uploading test logs to S3..."
+    if aws s3 cp "$error_log.gz" "s3://$LOG_BUCKET_NAME/wpe_logs/error/$(basename "$error_log.gz")"; then
+        echo -e "${GREEN}✓ Test error log uploaded successfully${NC}"
     else
-        echo -e "${RED}✗ Failed to upload test log${NC}"
-        rm "$test_log"
-        return 1
+        echo -e "${RED}✗ Failed to upload test error log${NC}"
+        exit_code=1
+    fi
+    
+    if aws s3 cp "$access_log.gz" "s3://$LOG_BUCKET_NAME/wpe_logs/nginx/$(basename "$access_log.gz")"; then
+        echo -e "${GREEN}✓ Test access log uploaded successfully${NC}"
+    else
+        echo -e "${RED}✗ Failed to upload test access log${NC}"
+        exit_code=1
+    fi
+    
+    if aws s3 cp "$apache_log.gz" "s3://$LOG_BUCKET_NAME/wpe_logs/nginx/$(basename "$apache_log.gz")"; then
+        echo -e "${GREEN}✓ Test Apache-style log uploaded successfully${NC}"
+    else
+        echo -e "${RED}✗ Failed to upload test Apache-style log${NC}"
+        exit_code=1
     fi
     
     # Clean up
-    rm "$test_log"
+    rm -rf "$test_dir"
     
     # Wait for processing
-    echo "Waiting for log processing (30 seconds)..."
-    sleep 30
+    echo "Waiting for log processing (5 seconds)..."
+    sleep 5
+    
+    # Wait for processing
+    echo "Waiting for log processing (5 seconds)..."
+    sleep 5
     
     # Check Lambda logs
     echo "Checking Lambda logs..."
     local log_group="/aws/lambda/wpe-log-analytics-prod-log-processor"
     
-    # Wait a bit for log group creation
-    sleep 5
-    
     # Check if log group exists
     if aws logs describe-log-groups --log-group-name-prefix "$log_group" | grep -q "$log_group"; then
-        # Wait a bit more for logs to be written
-        sleep 5
-        if aws logs get-log-events --log-group-name "$log_group" --limit 10 | grep -q "test log entry"; then
-            echo -e "${GREEN}✓ Log processing confirmed${NC}"
+        # Get most recent log stream
+        local log_stream=$(aws logs describe-log-streams --log-group-name "$log_group" --order-by LastEventTime --descending --limit 1 --query 'logStreams[0].logStreamName' --output text)
+        
+        # Get recent log events from that stream
+        local log_events=$(aws logs get-log-events --log-group-name "$log_group" --log-stream-name "$log_stream" --limit 100)
+        
+        # Check for each log type
+        if echo "$log_events" | grep -q "test error log entry"; then
+            echo -e "${GREEN}✓ Error log processing confirmed${NC}"
         else
-            echo -e "${YELLOW}! Could not find test log entry - check OpenSearch directly${NC}"
+            echo -e "${YELLOW}! Could not find error log entry${NC}"
+            exit_code=1
+        fi
+        
+        if echo "$log_events" | grep -q "example.com.*GET /test"; then
+            echo -e "${GREEN}✓ Standard access log processing confirmed${NC}"
+        else
+            echo -e "${YELLOW}! Could not find standard access log entry${NC}"
+            exit_code=1
+        fi
+        
+        if echo "$log_events" | grep -q "Mozilla/5.0.*GET /test"; then
+            echo -e "${GREEN}✓ Apache-style log processing confirmed${NC}"
+        else
+            echo -e "${YELLOW}! Could not find Apache-style log entry${NC}"
+            exit_code=1
         fi
     else
         echo -e "${YELLOW}! Log group not found yet - check OpenSearch directly${NC}"
+        exit_code=1
     fi
+    
+    return $exit_code
 }
 
 # Check OpenSearch dashboards
