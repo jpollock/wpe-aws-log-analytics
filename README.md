@@ -18,6 +18,47 @@ Before starting, make sure you have the required tools installed:
 1. [Install prerequisites](docs/user-guide/prerequisites.md)
 2. Verify your AWS credentials are configured
 3. Have your S3 bucket information ready
+4. Install pre-commit hooks for security scanning
+
+## Security Best Practices
+
+### Credential Management
+1. Never commit AWS credentials or sensitive information to the repository
+2. Use environment variables or AWS profiles for local development
+3. Store production credentials securely (e.g., AWS Secrets Manager)
+
+### Configuration Files
+1. Copy `.env.example` to `.env` for local development
+2. Copy `terraform.tfvars.example` to `terraform.tfvars` for infrastructure
+3. Add your specific values to these files but DO NOT commit them
+
+### Pre-commit Hooks
+The repository includes pre-commit hooks to prevent accidental credential leaks:
+```bash
+# Install pre-commit
+brew install pre-commit
+
+# Install the hooks
+pre-commit install
+```
+
+### AWS Credentials
+1. For local development:
+   - Use AWS profiles or environment variables
+   - LocalStack is configured by default for testing
+2. For production:
+   - Use IAM roles with minimal required permissions
+   - Enable AWS CloudTrail for audit logging
+   - Regularly rotate access keys
+
+### Repository Security
+1. All sensitive files are listed in .gitignore
+2. Pre-commit hooks scan for:
+   - AWS credentials
+   - Private keys
+   - Large files
+   - Merge conflicts
+3. Use gitleaks for additional secret scanning
 
 ### Installation
 
