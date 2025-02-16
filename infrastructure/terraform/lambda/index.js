@@ -1,24 +1,11 @@
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { SNSClient, PublishCommand } = require('@aws-sdk/client-sns');
 const { Client } = require('@opensearch-project/opensearch');
+const { NodeHttpHandler } = require('@aws-sdk/node-http-handler');
 const zlib = require('zlib');
 
-// Initialize clients
-const s3Client = new S3Client();
-const snsClient = new SNSClient();
-const opensearchClient = new Client({
-    node: `https://${process.env.OPENSEARCH_ENDPOINT}`,
-    auth: {
-        username: 'admin',
-        password: process.env.OPENSEARCH_PASSWORD
-    },
-    ssl: {
-        rejectUnauthorized: true
-    }
-});
-
-// Index mappings
-const indexMappings = {
+// Export index mappings for local development setup
+exports.indexMappings = {
     'access-logs': {
         mappings: {
             properties: {
@@ -62,6 +49,66 @@ const indexMappings = {
     }
 };
 
+// Initialize clients with LocalStack support
+function createClients() {
+    const s3Client = new S3Client({
+        ...(process.env.AWS_ENDPOINT_URL ? {
+            endpoint: process.env.AWS_ENDPOINT_URL,
+            region: process.env.AWS_REGION || 'us-west-2',
+            credentials: {
+                accessKeyId: process.env.AWS_ACCESS_KEY_ID || 'test',
+                secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || 'test'
+            },
+            forcePathStyle: true,
+            tls: false,
+            requestHandler: new NodeHttpHandler({
+                connectionTimeout: 5000,
+                socketTimeout: 5000
+            })
+        } : {})
+    });
+
+    const snsClient = new SNSClient({
+        ...(process.env.AWS_ENDPOINT_URL ? {
+            endpoint: process.env.AWS_ENDPOINT_URL,
+            region: process.env.AWS_REGION || 'us-west-2',
+            credentials: {
+                accessKeyId: process.env.AWS_ACCESS_KEY_ID || 'test',
+                secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || 'test'
+            },
+            forcePathStyle: true,
+            tls: false,
+            requestHandler: new NodeHttpHandler({
+                connectionTimeout: 5000,
+                socketTimeout: 5000
+            })
+        } : {})
+    });
+
+    const opensearchClient = new Client({
+        node: process.env.OPENSEARCH_ENDPOINT?.startsWith('localhost') 
+            ? `http://${process.env.OPENSEARCH_ENDPOINT}`
+            : `https://${process.env.OPENSEARCH_ENDPOINT}`,
+        auth: {
+            username: 'admin',
+            password: process.env.OPENSEARCH_PASSWORD
+        },
+        ssl: {
+            rejectUnauthorized: !process.env.OPENSEARCH_ENDPOINT?.startsWith('localhost')
+        }
+    });
+
+    return { s3Client, snsClient, opensearchClient };
+}
+
+// Initialize clients after environment variables are loaded
+const { s3Client, snsClient, opensearchClient } = createClients();
+
+// Export clients for local development
+exports.s3Client = s3Client;
+exports.snsClient = snsClient;
+exports.opensearchClient = opensearchClient;
+
 // Ensure index exists with mapping
 const ensureIndex = async (indexName) => {
     try {
@@ -73,7 +120,7 @@ const ensureIndex = async (indexName) => {
             console.log(`Creating index ${indexName} with mapping`);
             await opensearchClient.indices.create({
                 index: indexName,
-                body: indexMappings[indexName]
+                body: exports.indexMappings[indexName]
             });
             console.log(`Successfully created index ${indexName}`);
         }
@@ -86,11 +133,12 @@ const ensureIndex = async (indexName) => {
 // Parse error log line
 const parseErrorLog = (line) => {
     try {
-        const match = line.match(/\[(.*?)\] (.+)/);
+        // Updated regex to handle ISO8601 timestamps with timezone
+        const match = line.match(/\[([0-9T:.+-]+)\] (.+)/);
         if (!match) return null;
 
         const [, timestamp, message] = match;
-        // Validate timestamp format
+        // Parse the ISO8601 timestamp
         const date = new Date(timestamp);
         if (isNaN(date.getTime())) return null;
 
@@ -201,8 +249,8 @@ exports.formatLogForVerification = (entry, type) => {
     }
 };
 
-// Check for critical patterns
-const isCriticalError = (message) => {
+// Export for local development
+exports.isCriticalError = (message) => {
     const criticalPatterns = JSON.parse(process.env.ERROR_PATTERNS || '[]');
     return criticalPatterns.some(pattern => 
         message.toLowerCase().includes(pattern.toLowerCase())
@@ -225,8 +273,6 @@ const sendAlert = async (message, severity = 'INFO') => {
 
 // Index log entry in OpenSearch
 const indexLog = async (entry, index) => {
-    // Ensure index exists before attempting to write
-    await ensureIndex(index);
     console.log(`Attempting to index entry to ${index}:`, JSON.stringify(entry, null, 2));
     try {
         const response = await opensearchClient.index({
@@ -260,29 +306,23 @@ exports.handler = async (event) => {
         }
 
         const lines = content.toString('utf-8').split('\n').filter(line => line.trim());
-        
-        // Determine log type from path and filename
-        const isErrorLog = key.includes('/wpe_logs/error/');
+        console.log(`Processing ${lines.length} lines from ${key}`);
+        // Determine log type and index from path and filename
+        const isErrorLog = key.includes('wpe_logs/error/');
         const isApacheStyle = key.includes('apachestyle.log.gz');
-        let indexName;
+        const logType = isErrorLog ? 'error' : (isApacheStyle ? 'apache' : 'standard');
+        const indexName = isErrorLog ? 'error-logs' : (isApacheStyle ? 'apache-access-logs' : 'access-logs');
         
-        if (isErrorLog) {
-            indexName = 'error-logs';
-        } else if (isApacheStyle) {
-            indexName = 'apache-access-logs';
-        } else {
-            indexName = 'access-logs';
-        }
+        console.log(`Processing ${logType} log file, using index: ${indexName}`);
         
-        // Create indexes if they don't exist
+        // Ensure the correct index exists before processing
         await ensureIndex(indexName);
-
+        
         // Process each line
         for (const line of lines) {
             // Log the raw line for verification
             console.log('Processing raw log line:', line);
 
-            const logType = isErrorLog ? 'error' : (isApacheStyle ? 'apache' : 'standard');
             const entry = exports.processLogLine(line, logType);
             if (!entry) continue;
 
@@ -300,7 +340,7 @@ exports.handler = async (event) => {
             }
 
             // Check for critical errors
-            if (isErrorLog && isCriticalError(entry.message)) {
+            if (isErrorLog && exports.isCriticalError(entry.message)) {
                 await sendAlert(
                     `Critical Error Detected: ${entry.message}`,
                     'CRITICAL'
