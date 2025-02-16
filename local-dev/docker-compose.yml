@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.11.1
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "DISABLE_SECURITY_PLUGIN=true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+
+  localstack:
+    image: localstack/localstack:2.3
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,sns
+      - DEBUG=1
+      - AWS_DEFAULT_REGION=us-west-2
+    volumes:
+      - localstack-data:/tmp/localstack
+      - "/var/run/docker.sock:/var/run/docker.sock"
+
+volumes:
+  opensearch-data:
+  localstack-data:
